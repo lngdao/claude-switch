@@ -48,18 +48,18 @@ claude-switch ls --json          # JSON output for jq
 claude-switch current            # show the active profile + env (masked)
 claude-switch current --unmask   # show full values (requires confirmation)
 
-claude-switch use hano           # quick switch
-claude-switch use hano --dry-run # show diff without writing
+claude-switch use official           # quick switch
+claude-switch use official --dry-run # show diff without writing
 claude-switch use bad --force    # bypass the conflict guard
 
 claude-switch add                                                # interactive wizard
 claude-switch add work --scheme oauth --token sk-ant-oat01-...   # non-interactive
 claude-switch add proxy1 --scheme proxy --token sk-... --base-url https://anyrouter.top
 
-claude-switch edit hano                              # interactive menu
-claude-switch edit hano --set ENABLE_TOOL_SEARCH=true
-claude-switch edit hano --unset ENABLE_TOOL_SEARCH
-claude-switch edit hano --raw                        # open the env JSON in $EDITOR
+claude-switch edit official                              # interactive menu
+claude-switch edit official --set ENABLE_TOOL_SEARCH=true
+claude-switch edit official --unset ENABLE_TOOL_SEARCH
+claude-switch edit official --raw                        # open the env JSON in $EDITOR
 
 claude-switch rename "Official backup" official-backup
 claude-switch clone official official-test
@@ -67,8 +67,8 @@ claude-switch delete official-test
 claude-switch delete official-test -y                # skip confirmation
 
 claude-switch import ./shared.json --name shared
-claude-switch export hano --out ./hano.json
-claude-switch export hano --mask                     # masked stdout output
+claude-switch export official --out ./official.json
+claude-switch export official --mask                     # masked stdout output
 ```
 
 ### Doctor
