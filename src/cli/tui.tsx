@@ -764,17 +764,16 @@ function Header({ paths, tick }: { paths: Paths; tick: number }) {
   const version = useMemo(() => readSelfPackage()?.version ?? '?', []);
   return (
     <Box marginBottom={1} flexDirection="column">
-      <Text bold>╭─ Claude Code Profile Switcher ─╮</Text>
+      <Text bold>
+        ╭─ Claude Code Profile Switcher{' '}
+        <Text color="yellow">v{version}</Text> ─╮
+      </Text>
       <Text>
         <Text bold>│ </Text>
         Active: <Text color="cyan">{current}</Text>{' '}
         <Text dimColor>({schemeBadge(scheme)})</Text>
       </Text>
-      <Text>
-        <Text bold>│ </Text>
-        <Text dimColor>v{version}</Text>
-      </Text>
-      <Text bold>╰────────────────────────────────╯</Text>
+      <Text bold>╰─────────────────────────────────────────╯</Text>
     </Box>
   );
 }
