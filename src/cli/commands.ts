@@ -45,6 +45,14 @@ import {
   type ShellName,
 } from '../core/alias.js';
 import { TWEAKS, getTweak } from '../core/tweaks.js';
+import {
+  cachedUpdateInfo,
+  detectPackageManager,
+  installCommand,
+  performUpdate,
+  readSelfPackage,
+  type PackageManager,
+} from '../core/update-check.js';
 import { writeJsonAtomic } from '../core/fs-safe.js';
 import type { Paths } from '../core/paths.js';
 import {
@@ -867,6 +875,88 @@ export async function cmdTweakStatus(
     return 0;
   }
   return cmdTweakList(opts);
+}
+
+// ─── update ──────────────────────────────────────────────
+
+export async function cmdUpdate(
+  opts: GlobalOpts,
+  flags: { check?: boolean; pm?: string; force?: boolean } = {},
+): Promise<number> {
+  const pkg = readSelfPackage();
+  if (!pkg) {
+    console.error(c.red('Could not read package metadata'));
+    return 1;
+  }
+
+  // --check just reports cached status without installing
+  if (flags.check) {
+    const info = cachedUpdateInfo();
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          {
+            current: pkg.version,
+            latest: info?.latest ?? null,
+            hasUpdate: !!info,
+            type: info?.type ?? null,
+          },
+          null,
+          2,
+        ),
+      );
+      return 0;
+    }
+    if (info) {
+      console.log(
+        `${c.dim(info.current)} → ${c.green().bold(info.latest)} ${c.dim('(' + info.type + ')')}`,
+      );
+      console.log(c.dim('Run `claude-switch update` to install.'));
+    } else {
+      console.log(`${c.green('✓')} ${c.bold(pkg.name)}@${pkg.version} is up to date.`);
+      console.log(c.dim('(based on cached check; may be stale up to 24h)'));
+    }
+    return 0;
+  }
+
+  const pm = (flags.pm as PackageManager | undefined) ?? detectPackageManager();
+  const info = cachedUpdateInfo();
+
+  if (!info && !flags.force) {
+    console.log(`${c.green('✓')} ${c.bold(pkg.name)}@${pkg.version} appears up to date.`);
+    console.log(c.dim('Pass --force to reinstall the latest version anyway.'));
+    return 0;
+  }
+
+  if (info) {
+    console.log(
+      c.bold().yellow('Update available') +
+        c.dim(` (${info.type})`) +
+        `\n  ${c.dim(info.current)} → ${c.green().bold(info.latest)}` +
+        `\n  package: ${info.name}` +
+        `\n  manager: ${pm}\n`,
+    );
+  } else {
+    console.log(c.bold(`Reinstalling ${pkg.name}@latest via ${pm}…\n`));
+  }
+
+  if (!opts.yes) {
+    const ok = await confirm({ message: 'Install now?', default: true });
+    if (!ok) return 0;
+  }
+
+  const result = await performUpdate(pkg.name, { pm });
+  if (result.ok) {
+    console.log('');
+    console.log(c.green(`✓ Updated ${pkg.name}.`));
+    console.log(c.dim('  Re-run your command to use the new version.'));
+    return 0;
+  }
+  const { cmd, args } = installCommand(result.pm, pkg.name);
+  console.error('');
+  console.error(c.red(`✗ Update failed (exit ${result.code}).`));
+  console.error(c.dim(`  Try manually: ${cmd} ${args.join(' ')}`));
+  return 1;
 }
 
 // for unused detection if needed

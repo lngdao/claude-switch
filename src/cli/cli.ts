@@ -15,6 +15,7 @@ import {
   cmdTweakApply,
   cmdTweakList,
   cmdTweakStatus,
+  cmdUpdate,
   cmdImport,
   cmdInit,
   cmdLs,
@@ -219,6 +220,24 @@ export function buildCli(): Command {
     .option('--target <path>', 'binary path the alias should point to')
     .action(async (opts, cmd) => {
       process.exit(await cmdAliasPrint(getGlobal(cmd), opts));
+    });
+
+  // update — self-update from npm registry
+  program
+    .command('update')
+    .description('check for and install the latest version from npm')
+    .option('--check', 'only report whether an update is available')
+    .addOption(
+      new Option('--pm <manager>', 'override package manager').choices([
+        'npm',
+        'pnpm',
+        'yarn',
+        'bun',
+      ]),
+    )
+    .option('--force', 'reinstall latest even if already up to date')
+    .action(async (opts, cmd) => {
+      process.exit(await cmdUpdate(getGlobal(cmd), opts));
     });
 
   // tweak — apply opinionated tricks / config patches
