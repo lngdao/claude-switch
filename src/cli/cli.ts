@@ -1,5 +1,6 @@
 import { Command, Option } from 'commander';
 import { resolvePaths } from '../core/paths.js';
+import { readSelfPackage } from '../core/update-check.js';
 import {
   cmdAdd,
   cmdAliasInstall,
@@ -58,10 +59,11 @@ function getGlobal(cmd: Command): GlobalOpts {
 
 export function buildCli(): Command {
   const program = new Command();
+  const pkg = readSelfPackage();
   program
     .name('claude-switch')
     .description('TUI + CLI to manage Claude Code auth profiles')
-    .version('0.1.0')
+    .version(pkg?.version ?? '0.0.0')
     .option('--profiles-dir <path>', 'override profiles directory')
     .option('--settings <path>', 'override settings.json path')
     .option('--claude-json <path>', 'override ~/.claude.json path')

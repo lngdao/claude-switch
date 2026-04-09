@@ -25,6 +25,7 @@ import {
 } from '../core/scheme.js';
 import { runDoctor, probeOne, type CheckResult } from '../core/doctor.js';
 import { performInit, readLocalOauthAccount } from '../core/headless.js';
+import { readSelfPackage } from '../core/update-check.js';
 import {
   aliasStatus,
   detectBinaryPath,
@@ -760,6 +761,7 @@ function Header({ paths, tick }: { paths: Paths; tick: number }) {
   const env = useMemo(() => readSettingsEnv(paths), [paths, tick]);
   const current = useMemo(() => detectCurrent(paths, env), [paths, env, tick]);
   const scheme = detectScheme(env);
+  const version = useMemo(() => readSelfPackage()?.version ?? '?', []);
   return (
     <Box marginBottom={1} flexDirection="column">
       <Text bold>╭─ Claude Code Profile Switcher ─╮</Text>
@@ -767,6 +769,10 @@ function Header({ paths, tick }: { paths: Paths; tick: number }) {
         <Text bold>│ </Text>
         Active: <Text color="cyan">{current}</Text>{' '}
         <Text dimColor>({schemeBadge(scheme)})</Text>
+      </Text>
+      <Text>
+        <Text bold>│ </Text>
+        <Text dimColor>v{version}</Text>
       </Text>
       <Text bold>╰────────────────────────────────╯</Text>
     </Box>
