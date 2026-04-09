@@ -3,6 +3,7 @@ import { resolvePaths } from '../core/paths.js';
 import {
   cmdAdd,
   cmdAliasInstall,
+  cmdAliasPrint,
   cmdAliasStatus,
   cmdAliasUninstall,
   cmdClone,
@@ -210,6 +211,14 @@ export function buildCli(): Command {
     .description('show shell alias installation status')
     .action(async (_o, cmd) => {
       process.exit(await cmdAliasStatus(getGlobal(cmd)));
+    });
+  alias
+    .command('print')
+    .description('print a one-line shell alias for `eval "$(claude-switch alias print)"`')
+    .option('--name <name>', 'alias name', 'cs')
+    .option('--target <path>', 'binary path the alias should point to')
+    .action(async (opts, cmd) => {
+      process.exit(await cmdAliasPrint(getGlobal(cmd), opts));
     });
 
   // tweak — apply opinionated tricks / config patches

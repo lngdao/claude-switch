@@ -317,6 +317,24 @@ function App({ paths }: AppProps) {
             .map((r) => `${r.shell}:${r.action}`)
             .join(' ');
           setToast({ msg: `Install: ${summary}`, tone: 'ok' });
+          // Queue a post-exit hint so the user knows how to activate the
+          // alias in their current shell. Child process can't modify the
+          // parent shell environment, so we print on quit instead.
+          const touched = results.filter(
+            (r) => r.action === 'created' || r.action === 'updated',
+          );
+          if (touched.length > 0) {
+            const lines = ['', `Alias '${mode.aliasName}' installed. To use it now in this shell:`];
+            for (const r of touched) {
+              lines.push(`  source ${r.rcPath}`);
+            }
+            lines.push('');
+            lines.push('Or open a new terminal — it will load automatically.');
+            lines.push(
+              `Or one-shot: eval "$(claude-switch alias print)"`,
+            );
+            postExitMessage = lines.join('\n');
+          }
         } catch (e) {
           setToast({ msg: (e as Error).message, tone: 'err' });
         }
@@ -1941,7 +1959,22 @@ async function copyToClipboard(value: string): Promise<boolean> {
   }
 }
 
+/**
+ * Module-level message queued by TUI screens (e.g. alias installer) to be
+ * printed AFTER Ink unmounts and the process exits. This is how we surface
+ * post-action hints that need to live past the TUI session — child processes
+ * can't modify their parent shell so we just instruct the user instead.
+ */
+let postExitMessage: string | null = null;
+
 export function runTui(): void {
   const paths = resolvePaths();
   render(<App paths={paths} />);
+  // Print queued message after Ink finishes unmounting. The 'exit' event
+  // fires synchronously right before process exit.
+  process.on('exit', () => {
+    if (postExitMessage) {
+      process.stdout.write('\n' + postExitMessage + '\n');
+    }
+  });
 }

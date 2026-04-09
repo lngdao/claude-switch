@@ -706,14 +706,40 @@ export async function cmdAliasInstall(
       if (r.diff) console.log(c.dim(`      ${r.diff.replace(/\n/g, '\n      ')}`));
     }
     if (!flags.dryRun) {
-      console.log('');
-      console.log(c.dim('Open a new shell or `source` the rc file to use it.'));
+      const touched = results.filter(
+        (r) => r.action === 'created' || r.action === 'updated',
+      );
+      if (touched.length > 0) {
+        console.log('');
+        console.log(c.bold('To use the alias right now in this shell:'));
+        for (const r of touched) {
+          console.log(`  ${c.cyan(`source ${r.rcPath}`)}`);
+        }
+        console.log('');
+        console.log(c.dim('Or open a new terminal — the alias will load automatically.'));
+        console.log(
+          c.dim('Or one-shot: ') + c.cyan(`eval "$(claude-switch alias print)"`),
+        );
+      }
     }
     return 0;
   } catch (e) {
     console.error(c.red((e as Error).message));
     return 1;
   }
+}
+
+export async function cmdAliasPrint(
+  opts: GlobalOpts,
+  flags: { name?: string; target?: string } = {},
+): Promise<number> {
+  const name = flags.name ?? 'cs';
+  const target = flags.target ?? detectBinaryPath();
+  // Single-line shell-eval-able alias for `eval "$(claude-switch alias print)"`
+  // Using single quotes; embed the target safely.
+  const escaped = target.replace(/'/g, `'\\''`);
+  process.stdout.write(`alias ${name}='${escaped}'\n`);
+  return 0;
 }
 
 export async function cmdAliasUninstall(
