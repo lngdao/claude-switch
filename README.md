@@ -110,6 +110,32 @@ claude-switch init --ansible --token sk-ant-oat01-... \
   --account-uuid ... --email ... --org-uuid ... > tasks/claude.yml
 ```
 
+### Self-update
+
+`claude-switch` checks the npm registry once per day in the background and prompts you on the next interactive run if a newer version is available — same flow as oh-my-zsh:
+
+```
+Update available (patch)
+  2026.410.3 → 2026.410.4
+  package: @lngdao/claude-switch
+
+? Update now? (Y/n)
+```
+
+Saying yes spawns the install command (`npm i -g @lngdao/claude-switch@latest`, auto-detected from `npm`/`pnpm`/`yarn`/`bun`) and exits with a re-run hint.
+
+You can also drive it explicitly:
+
+```bash
+claude-switch update --check        # report cached status only
+claude-switch update                # interactive: confirm + install
+claude-switch update -y             # non-interactive
+claude-switch update --pm pnpm      # force a specific package manager
+claude-switch update --force        # reinstall latest even if up to date
+```
+
+Disable the auto prompt with `CLAUDE_SWITCH_NO_UPDATE_CHECK=1` or the standard `NO_UPDATE_NOTIFIER=1`. The auto prompt is also skipped automatically for `--json`, `-y`, the `update` command itself, when `CI=true`, and when stdin is not a TTY.
+
 ### Shell alias installer
 
 ```bash
