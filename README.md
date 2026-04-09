@@ -191,20 +191,27 @@ The current suite has **83 test cases** covering scheme detection, profile CRUD,
 
 ## Release flow
 
-Releases are published automatically via GitHub Actions when you push a `v*` tag:
+Releases use **date-based versioning**: `YYYY.MDD.N` (e.g. `2026.410.1`). Run:
 
 ```bash
-npm version patch   # or minor / major
-git push --follow-tags
+npm run release           # interactive: bumps, commits, tags, pushes
+npm run release:dry       # show what would happen, no changes
 ```
 
-The `.github/workflows/publish.yml` workflow:
+The script (`scripts/release.sh`):
+1. Aborts if the working tree is dirty or you're not on `main`.
+2. Computes the next version from today's date plus an auto-incremented patch (collisions detected from existing `v*` tags).
+3. Runs `npm run typecheck && npm test && npm run build` as a safety net.
+4. Bumps `package.json` (and `package-lock.json`), commits with `release: <version>`, tags `vYYYY.MDD.N`, pushes branch + tag.
+5. The `.github/workflows/publish.yml` workflow picks up the tag and publishes via `npm publish --provenance --access public` (provenance attestation via OIDC, auth via the `NPM_TOKEN` repo secret).
 
-1. Runs typecheck + tests + build.
-2. Verifies the version in `package.json` matches the pushed tag.
-3. Publishes via `npm publish --provenance --access public` (provenance attestation via OIDC, auth via the `NPM_TOKEN` repo secret).
+Override the auto-computed version:
 
-Manual trigger is also available through the GitHub Actions "workflow_dispatch" UI, with a `dry-run` option that runs the full pipeline without publishing.
+```bash
+./scripts/release.sh 2026.410.5
+```
+
+Manual workflow trigger is also available through the GitHub Actions "workflow_dispatch" UI with two inputs: `dry-run` (full pipeline without publishing) and `no-provenance` (escape hatch for the first-publish-of-a-new-package edge case).
 
 ## Notes
 
