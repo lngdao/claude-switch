@@ -10,6 +10,10 @@ on:
         description: 'Dry run only (no publish)'
         required: false
         default: 'false'
+      no-provenance:
+        description: 'Disable provenance (use for first publish to a new package name)'
+        required: false
+        default: 'false'
 
 jobs:
   publish:
@@ -51,12 +55,22 @@ jobs:
 
       - name: Publish (dry-run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run == 'true'
-        run: npm publish --provenance --access public --dry-run
+        run: |
+          if [ "${{ github.event.inputs.no-provenance }}" = "true" ]; then
+            npm publish --access public --dry-run
+          else
+            npm publish --provenance --access public --dry-run
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to npm
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run != 'true')
-        run: npm publish --provenance --access public
+        run: |
+          if [ "${{ github.event.inputs.no-provenance }}" = "true" ]; then
+            npm publish --access public
+          else
+            npm publish --provenance --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
