@@ -28,12 +28,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@lngdao'
-          always-auth: true
           cache: npm
 
       - run: npm ci
+
+      - name: Configure npm auth
+        run: |
+          # Write .npmrc manually so we control exactly what auth is used.
+          # setup-node's auto-generated .npmrc has been observed to 404 with
+          # granular tokens on scoped packages — writing it ourselves matches
+          # the format that works locally.
+          cat > "$HOME/.npmrc" <<EOF
+          //registry.npmjs.org/:_authToken=${NPM_TOKEN}
+          registry=https://registry.npmjs.org/
+          always-auth=true
+          EOF
+          chmod 600 "$HOME/.npmrc"
+          echo "npm whoami:"
+          npm whoami
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Typecheck
         run: npm run typecheck
@@ -63,8 +77,6 @@ jobs:
           else
             npm publish --access public --dry-run
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish to npm
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry-run != 'true')
@@ -74,8 +86,6 @@ jobs:
           else
             npm publish --access public
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
