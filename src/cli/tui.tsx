@@ -34,7 +34,10 @@ import {
   type ShellName,
 } from '../core/alias.js';
 import { TWEAKS, type TweakStatus } from '../core/tweaks.js';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+import { ProfileSchema, type Profile } from '../core/schema.js';
+import { writeJsonAtomic } from '../core/fs-safe.js';
 import { timeAgo } from './format.js';
 
 interface AppProps {
@@ -60,7 +63,9 @@ type Mode =
       statuses: Array<{ id: string; title: string; description: string; status: TweakStatus }>;
       cursor: number;
       busy: boolean;
-    };
+    }
+  | { kind: 'import'; step: 'path' | 'name'; filePath: string; profileName: string }
+  | { kind: 'export'; step: 'path' | 'mask'; outPath: string; mask: boolean; sourceName: string };
 
 type NewStep = 'name' | 'scheme' | 'token' | 'baseUrl' | 'extras' | 'review';
 type NewDraft = {
@@ -170,15 +175,17 @@ function App({ paths }: AppProps) {
       return;
     }
 
-    // newProfile / editProfile / rename / clone / init have their own
-    // form components handling input via TextInput's onSubmit; only Esc =
-    // cancel here.
+    // newProfile / editProfile / rename / clone / init / import / export
+    // have their own form components handling input via TextInput's onSubmit;
+    // only Esc = cancel here.
     if (
       mode.kind === 'newProfile' ||
       mode.kind === 'editProfile' ||
       mode.kind === 'rename' ||
       mode.kind === 'clone' ||
-      mode.kind === 'init'
+      mode.kind === 'init' ||
+      mode.kind === 'import' ||
+      mode.kind === 'export'
     ) {
       if (key.escape) {
         setMode({ kind: 'list' });
@@ -486,6 +493,26 @@ function App({ paths }: AppProps) {
       });
       return;
     }
+    if (inputCh === 'I') {
+      setMode({
+        kind: 'import',
+        step: 'path',
+        filePath: './profile.json',
+        profileName: '',
+      });
+      return;
+    }
+    if (inputCh === 'E') {
+      if (!selected) return;
+      setMode({
+        kind: 'export',
+        step: 'path',
+        outPath: `./${selected.name}.json`,
+        mask: false,
+        sourceName: selected.name,
+      });
+      return;
+    }
     if (inputCh === 'T') {
       // Snapshot tweak statuses synchronously to render immediately
       Promise.all(
@@ -648,6 +675,37 @@ function App({ paths }: AppProps) {
 
   if (mode.kind === 'tweaks') {
     return <TweaksScreen mode={mode} />;
+  }
+
+  if (mode.kind === 'import') {
+    return (
+      <ImportForm
+        paths={paths}
+        mode={mode}
+        onDone={(name) => {
+          setMode({ kind: 'list' });
+          setToast({ msg: `Imported as ${name}`, tone: 'ok' });
+          setTick((t) => t + 1);
+        }}
+        onError={(msg) => setToast({ msg, tone: 'err' })}
+        setMode={setMode}
+      />
+    );
+  }
+
+  if (mode.kind === 'export') {
+    return (
+      <ExportForm
+        paths={paths}
+        mode={mode}
+        onDone={(outPath) => {
+          setMode({ kind: 'list' });
+          setToast({ msg: `Exported to ${outPath}`, tone: 'ok' });
+        }}
+        onError={(msg) => setToast({ msg, tone: 'err' })}
+        setMode={setMode}
+      />
+    );
   }
 
   return (
@@ -826,8 +884,8 @@ function Footer({ mode }: { mode: Mode }) {
         ↑↓ profile · ←→ env · enter switch · c copy · p probe
       </Text>
       <Text dimColor>
-        n new · e edit · R rename · C clone · d delete · D doctor · i init · T
-        tweaks · A alias · r refresh · ? help · q quit
+        n new · e edit · R rename · C clone · d delete · I import · E export ·
+        D doctor · i init · T tweaks · A alias · r refresh · ? help · q quit
       </Text>
     </Box>
   );
@@ -849,6 +907,8 @@ function HelpScreen() {
       <Text>  R        Rename selected profile</Text>
       <Text>  C        Clone selected profile</Text>
       <Text>  d        Delete selected profile</Text>
+      <Text>  I        Import a profile from a JSON file</Text>
+      <Text>  E        Export selected profile to a JSON file</Text>
       <Text> </Text>
       <Text bold color="cyan">Auth / health</Text>
       <Text>  i        Init wizard (write ~/.claude.json + first profile)</Text>
@@ -1357,6 +1417,216 @@ function CloneForm({
       <Text dimColor>Enter to confirm · Esc to cancel</Text>
     </FormShell>
   );
+}
+
+// ─── Import / export forms ────────────────────────────────
+
+function basenameNoExt(path: string): string {
+  const last = path.split(/[\\/]/).pop() ?? '';
+  return last.replace(/\.json$/i, '');
+}
+
+function ImportForm({
+  paths,
+  mode,
+  onDone,
+  onError,
+  setMode,
+}: FormProps<Extract<Mode, { kind: 'import' }>>) {
+  const { step } = mode;
+
+  if (step === 'path') {
+    return (
+      <FormShell title="Import profile — path to JSON file">
+        <TextInput
+          value={mode.filePath}
+          onChange={(v) => setMode({ ...mode, filePath: v })}
+          onSubmit={(v) => {
+            const file = resolvePath(v.trim());
+            if (!file) {
+              onError('File path is required');
+              return;
+            }
+            if (!existsSync(file)) {
+              onError(`File not found: ${file}`);
+              return;
+            }
+            // Quick parse check so we fail fast (don't wait for the next step)
+            try {
+              const raw = JSON.parse(readFileSync(file, 'utf8'));
+              const parsed = ProfileSchema.safeParse(raw);
+              if (!parsed.success) {
+                onError(
+                  `Schema error: ${parsed.error.issues
+                    .map((i) => i.message)
+                    .join('; ')}`,
+                );
+                return;
+              }
+            } catch (e) {
+              onError(`Invalid JSON: ${(e as Error).message}`);
+              return;
+            }
+            setMode({
+              ...mode,
+              filePath: file,
+              profileName: basenameNoExt(file),
+              step: 'name',
+            });
+          }}
+          placeholder="./profile.json"
+        />
+        <Text dimColor>Enter to load · Esc to cancel</Text>
+      </FormShell>
+    );
+  }
+
+  if (step === 'name') {
+    return (
+      <FormShell title={`Import as profile name`}>
+        <Text dimColor>From {mode.filePath}</Text>
+        <Text> </Text>
+        <TextInput
+          value={mode.profileName}
+          onChange={(v) => setMode({ ...mode, profileName: v })}
+          onSubmit={(v) => {
+            const name = v.trim();
+            if (!name) {
+              onError('Profile name is required');
+              return;
+            }
+            if (existsSync(profileFile(paths, name))) {
+              onError(`Profile already exists: ${name}`);
+              return;
+            }
+            try {
+              const raw = JSON.parse(readFileSync(mode.filePath, 'utf8'));
+              const parsed = ProfileSchema.safeParse(raw);
+              if (!parsed.success) {
+                onError('Schema error (re-parse failed)');
+                return;
+              }
+              writeProfile(paths, name, parsed.data);
+              onDone(name);
+            } catch (e) {
+              onError((e as Error).message);
+            }
+          }}
+        />
+        <Text dimColor>Enter to save · Esc to cancel</Text>
+      </FormShell>
+    );
+  }
+
+  return null;
+}
+
+function ExportForm({
+  paths,
+  mode,
+  onDone,
+  onError,
+  setMode,
+}: FormProps<Extract<Mode, { kind: 'export' }>>) {
+  const { step } = mode;
+
+  if (step === 'path') {
+    return (
+      <FormShell title={`Export '${mode.sourceName}' — output path`}>
+        <TextInput
+          value={mode.outPath}
+          onChange={(v) => setMode({ ...mode, outPath: v })}
+          onSubmit={(v) => {
+            const out = v.trim();
+            if (!out) {
+              onError('Output path is required');
+              return;
+            }
+            setMode({ ...mode, outPath: resolvePath(out), step: 'mask' });
+          }}
+        />
+        <Text dimColor>Default is ./{mode.sourceName}.json · Enter to next · Esc cancel</Text>
+      </FormShell>
+    );
+  }
+
+  if (step === 'mask') {
+    return (
+      <FormShell title={`Mask secret values?`}>
+        <Text>
+          Target: <Text dimColor>{mode.outPath}</Text>
+        </Text>
+        <Text> </Text>
+        <Text>
+          Mask secrets in the exported file?{' '}
+          <Text color={mode.mask ? 'green' : 'yellow'} bold>
+            {mode.mask ? 'YES' : 'NO (raw tokens)'}
+          </Text>
+        </Text>
+        <Text dimColor>
+          Press space to toggle · Enter to write · Esc to cancel
+        </Text>
+        {/* Hidden input absorbs key events for this step */}
+        <ExportMaskKeys
+          mask={mode.mask}
+          onToggle={() => setMode({ ...mode, mask: !mode.mask })}
+          onSubmit={() => {
+            try {
+              const profile = readProfile(paths, mode.sourceName);
+              const out: Profile = mode.mask
+                ? {
+                    env: Object.fromEntries(
+                      Object.entries(profile.env).map(([k, v]) => [
+                        k,
+                        maskValue(k, v),
+                      ]),
+                    ),
+                    meta: profile.meta,
+                  }
+                : profile;
+              writeJsonAtomic(mode.outPath, out, { mode: 0o600 });
+              onDone(mode.outPath);
+            } catch (e) {
+              onError((e as Error).message);
+            }
+          }}
+        />
+      </FormShell>
+    );
+  }
+
+  return null;
+}
+
+function ExportMaskKeys({
+  mask,
+  onToggle,
+  onSubmit,
+}: {
+  mask: boolean;
+  onToggle: () => void;
+  onSubmit: () => void;
+}) {
+  useInput((inputCh, key) => {
+    if (key.return) {
+      onSubmit();
+      return;
+    }
+    if (inputCh === ' ' || inputCh === 'm' || inputCh === 'M') {
+      onToggle();
+      return;
+    }
+    if (inputCh === 'y' || inputCh === 'Y') {
+      // Submit with mask=true regardless of current state
+      if (!mask) onToggle();
+      onSubmit();
+    }
+    if (inputCh === 'n' || inputCh === 'N') {
+      if (mask) onToggle();
+      onSubmit();
+    }
+  });
+  return null;
 }
 
 // ─── Doctor screen ────────────────────────────────────────
