@@ -267,6 +267,7 @@ export function buildCli(): Command {
   program
     .command('init')
     .description('headless setup: write ~/.claude.json + first profile')
+    .option('--auto', 'run `claude setup-token` automatically and capture the result')
     .option('--token <t>', 'OAuth token')
     .option('--account-uuid <u>', 'oauthAccount.accountUuid')
     .option('--email <e>', 'oauthAccount.emailAddress')

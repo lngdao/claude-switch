@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { ClaudeJsonSchema, type OauthAccount } from './schema.js';
 import { writeJsonAtomic } from './fs-safe.js';
@@ -109,6 +109,120 @@ async function detectClaudeVersion(): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+export interface SetupTokenResult {
+  /** Extracted long-lived OAuth token, or null if it couldn't be parsed. */
+  token: string | null;
+  /** Exit code of the spawned `claude setup-token` process. */
+  code: number | null;
+  /** Captured stdout (mostly for diagnostics). */
+  output: string;
+  /** Set when the `claude` binary is not on PATH. */
+  notInstalled?: boolean;
+}
+
+/**
+ * Spawn `claude setup-token`, tee its stdout to the parent terminal so the
+ * user sees the OAuth instructions live, and parse the long-lived token from
+ * the captured output once the process exits.
+ *
+ * The OAuth token format is `sk-ant-oat01-…` and Claude Code prints it on its
+ * own line near the end of the flow ("Use this token by setting: export
+ * CLAUDE_CODE_OAUTH_TOKEN=<token>").
+ */
+export async function runClaudeSetupToken(): Promise<SetupTokenResult> {
+  return new Promise((resolve) => {
+    let captured = '';
+    let child;
+    try {
+      child = spawn('claude', ['setup-token'], {
+        // stdin: inherit so user can answer any prompts claude shows
+        // stdout: pipe so we can capture (and tee) the token
+        // stderr: inherit so user sees errors live
+        stdio: ['inherit', 'pipe', 'inherit'],
+      });
+    } catch (e) {
+      resolve({
+        token: null,
+        code: null,
+        output: '',
+        notInstalled: (e as NodeJS.ErrnoException).code === 'ENOENT',
+      });
+      return;
+    }
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const text = chunk.toString();
+      captured += text;
+      process.stdout.write(text);
+    });
+
+    child.on('error', (e) => {
+      const enoent = (e as NodeJS.ErrnoException).code === 'ENOENT';
+      resolve({
+        token: null,
+        code: null,
+        output: captured,
+        notInstalled: enoent,
+      });
+    });
+
+    child.on('close', (code) => {
+      // Match the OAuth token wherever it appears in the captured output.
+      // Token format: sk-ant-oat01-<base64-ish>; allow common URL/JWT chars.
+      const match = captured.match(/sk-ant-oat01-[A-Za-z0-9_\-+=/]+/);
+      resolve({
+        token: match ? match[0] : null,
+        code,
+        output: captured,
+      });
+    });
+  });
+}
+
+/**
+ * Convenience wrapper for the full headless setup flow:
+ *  1. Run `claude setup-token` (interactive browser flow).
+ *  2. Read the freshly-populated `oauthAccount` from the local
+ *     `~/.claude.json` (Claude Code writes this after a successful setup).
+ *  3. Write our own `~/.claude.json` plus a profile via `performInit`.
+ *
+ * Returns the InitResult on success, or throws an Error explaining what
+ * went wrong (no claude binary, no token, no oauthAccount, etc).
+ */
+export async function performAutoInit(
+  paths: Paths,
+  options: { profileName?: string; lastOnboardingVersion?: string } = {},
+): Promise<{ profileName: string; claudeJsonPath: string }> {
+  const result = await runClaudeSetupToken();
+  if (result.notInstalled) {
+    throw new Error(
+      "`claude` CLI not found on PATH. Install it first (https://docs.claude.com/claude-code).",
+    );
+  }
+  if (result.code !== 0) {
+    throw new Error(`claude setup-token exited with code ${result.code}`);
+  }
+  if (!result.token) {
+    throw new Error(
+      'Could not extract an OAuth token from the setup-token output.',
+    );
+  }
+
+  const account = readLocalOauthAccount(paths);
+  if (!account) {
+    throw new Error(
+      'No oauthAccount in ~/.claude.json after setup-token. Make sure the OAuth flow completed.',
+    );
+  }
+
+  return performInit(paths, {
+    token: result.token,
+    account,
+    profileName: options.profileName,
+    lastOnboardingVersion: options.lastOnboardingVersion,
+  });
 }
 
 export function readLocalOauthAccount(paths: Paths): OauthAccount | null {

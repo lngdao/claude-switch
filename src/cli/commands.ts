@@ -32,6 +32,7 @@ import { runDoctor } from '../core/doctor.js';
 import {
   buildAnsibleSnippet,
   buildBashScript,
+  performAutoInit,
   performInit,
   readLocalOauthAccount,
   type InitInput,
@@ -569,6 +570,7 @@ export async function cmdDoctor(
 export async function cmdInit(
   opts: GlobalOpts,
   flags: {
+    auto?: boolean;
     token?: string;
     accountUuid?: string;
     email?: string;
@@ -580,6 +582,36 @@ export async function cmdInit(
     onboardingVersion?: string;
   } = {},
 ): Promise<number> {
+  // Auto mode: spawn `claude setup-token`, capture token, derive account
+  if (flags.auto) {
+    console.log(c.bold('Running `claude setup-token`…'));
+    console.log(
+      c.dim('A browser window will open. Complete the OAuth flow there.\n'),
+    );
+    try {
+      const result = await performAutoInit(opts.paths, {
+        profileName: flags.profileName,
+        lastOnboardingVersion: flags.onboardingVersion,
+      });
+      console.log('');
+      console.log(
+        c.green(
+          `✓ Wrote ${result.claudeJsonPath} and profile '${result.profileName}'`,
+        ),
+      );
+      console.log(
+        c.dim(
+          `  Tip: now run \`claude-switch use ${result.profileName}\` to activate it.`,
+        ),
+      );
+      return 0;
+    } catch (e) {
+      console.error('');
+      console.error(c.red(`✗ ${(e as Error).message}`));
+      return 1;
+    }
+  }
+
   let token = flags.token;
   let accountUuid = flags.accountUuid;
   let email = flags.email;

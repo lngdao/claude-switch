@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Text, render, useApp, useInput } from 'ink';
+import { Box, Text, render, useApp, useInput, useStdin } from 'ink';
 import TextInput from 'ink-text-input';
 import { resolvePaths, type Paths } from '../core/paths.js';
 import {
@@ -24,7 +24,11 @@ import {
   schemeBadge,
 } from '../core/scheme.js';
 import { runDoctor, probeOne, type CheckResult } from '../core/doctor.js';
-import { performInit, readLocalOauthAccount } from '../core/headless.js';
+import {
+  performAutoInit,
+  performInit,
+  readLocalOauthAccount,
+} from '../core/headless.js';
 import { readSelfPackage } from '../core/update-check.js';
 import {
   aliasStatus,
@@ -85,6 +89,7 @@ type EditDraft = {
 };
 
 type InitStep =
+  | 'chooseMode'
   | 'token'
   | 'accountUuid'
   | 'email'
@@ -92,6 +97,8 @@ type InitStep =
   | 'profileName'
   | 'review';
 type InitDraft = {
+  mode: 'auto' | 'manual';
+  modeCursor: number;
   token: string;
   accountUuid: string;
   email: string;
@@ -547,13 +554,15 @@ function App({ paths }: AppProps) {
       return;
     }
     if (inputCh === 'i') {
-      // Pre-fill from local ~/.claude.json if available
+      // Pre-fill from local ~/.claude.json if available (used by manual flow)
       const local = readLocalOauthAccount(paths);
       const prefilled = !!local;
       setMode({
         kind: 'init',
-        step: 'token',
+        step: 'chooseMode',
         draft: {
+          mode: 'auto',
+          modeCursor: 0,
           token: '',
           accountUuid: local?.accountUuid ?? '',
           email: local?.emailAddress ?? '',
@@ -562,12 +571,6 @@ function App({ paths }: AppProps) {
           prefilled,
         },
       });
-      if (prefilled) {
-        setToast({
-          msg: 'Pre-filled account info from ~/.claude.json',
-          tone: 'info',
-        });
-      }
       return;
     }
   });
@@ -1341,6 +1344,44 @@ function FormShell({
   );
 }
 
+function InitModePicker({
+  cursor,
+  choices,
+  onMove,
+  onSubmit,
+}: {
+  cursor: number;
+  choices: ReadonlyArray<{ key: string; title: string; detail: string }>;
+  onMove: (delta: number) => void;
+  onSubmit: () => void;
+}) {
+  useInput((inputCh, key) => {
+    if (key.upArrow || inputCh === 'k') onMove(-1);
+    else if (key.downArrow || inputCh === 'j') onMove(1);
+    else if (key.return) onSubmit();
+  });
+  return (
+    <Box flexDirection="column">
+      {choices.map((c, i) => {
+        const isCursor = i === cursor;
+        return (
+          <Box key={c.key} flexDirection="column">
+            <Text>
+              <Text color={isCursor ? 'cyan' : undefined}>
+                {isCursor ? '› ' : '  '}
+              </Text>
+              <Text bold>{c.title}</Text>
+            </Text>
+            <Text dimColor>    {c.detail}</Text>
+            <Text> </Text>
+          </Box>
+        );
+      })}
+      <Text dimColor>↑↓ nav · Enter select · Esc cancel</Text>
+    </Box>
+  );
+}
+
 function SchemePicker({
   schemes,
   labels,
@@ -1706,6 +1747,7 @@ function InitForm({
   onError,
   setMode,
 }: FormProps<Extract<Mode, { kind: 'init' }>>) {
+  const { exit } = useApp();
   const { step, draft } = mode;
 
   const update = (next: Partial<InitDraft>, nextStep?: InitStep) => {
@@ -1715,6 +1757,69 @@ function InitForm({
       draft: { ...draft, ...next },
     });
   };
+
+  if (step === 'chooseMode') {
+    const choices = [
+      {
+        key: 'auto',
+        title: 'Auto — run `claude setup-token` for me',
+        detail:
+          'Spawns Claude Code, opens the browser, captures the token, and reads accountUuid/email/orgUuid from ~/.claude.json. Requires the `claude` CLI on PATH.',
+      },
+      {
+        key: 'manual',
+        title: 'Manual — paste a token I already have',
+        detail: draft.prefilled
+          ? 'Pre-filled accountUuid/email/orgUuid from local ~/.claude.json.'
+          : 'You will be prompted for token, accountUuid, email, and organizationUuid one by one.',
+      },
+    ] as const;
+    return (
+      <FormShell title="Init — choose mode">
+        <InitModePicker
+          cursor={draft.modeCursor}
+          choices={choices}
+          onMove={(d) => {
+            const next = Math.max(
+              0,
+              Math.min(choices.length - 1, draft.modeCursor + d),
+            );
+            update({ modeCursor: next });
+          }}
+          onSubmit={() => {
+            const picked = choices[draft.modeCursor];
+            if (!picked) return;
+            if (picked.key === 'manual') {
+              update({ mode: 'manual' }, 'token');
+              return;
+            }
+            // Auto: queue a post-exit action and unmount Ink so claude
+            // setup-token can take over the terminal cleanly. The browser
+            // window will open and the user finishes OAuth there.
+            postExitAction = async () => {
+              process.stdout.write(
+                '\nRunning `claude setup-token`. A browser window will open — complete the OAuth flow there.\n\n',
+              );
+              try {
+                const result = await performAutoInit(paths, {
+                  profileName: draft.profileName,
+                });
+                process.stdout.write(
+                  `\n\u001b[32m✓ Wrote ${result.claudeJsonPath} and profile '${result.profileName}'.\u001b[0m\n` +
+                    `\u001b[2m  Run \`claude-switch use ${result.profileName}\` to activate it.\u001b[0m\n`,
+                );
+              } catch (e) {
+                process.stdout.write(
+                  `\n\u001b[31m✗ ${(e as Error).message}\u001b[0m\n`,
+                );
+              }
+            };
+            exit();
+          }}
+        />
+      </FormShell>
+    );
+  }
 
   if (step === 'token') {
     return (
@@ -1966,20 +2071,27 @@ async function copyToClipboard(value: string): Promise<boolean> {
 
 /**
  * Module-level message queued by TUI screens (e.g. alias installer) to be
- * printed AFTER Ink unmounts and the process exits. This is how we surface
- * post-action hints that need to live past the TUI session — child processes
- * can't modify their parent shell so we just instruct the user instead.
+ * printed AFTER Ink unmounts and the process exits. Child processes can't
+ * modify their parent shell so we just instruct the user instead.
  */
 let postExitMessage: string | null = null;
 
-export function runTui(): void {
+/**
+ * Module-level async action queued by TUI screens (e.g. init auto mode) to
+ * run AFTER Ink unmounts. Useful when you need clean control over the
+ * terminal — e.g. spawning `claude setup-token` so the user sees the OAuth
+ * prompts directly without Ink redrawing on top.
+ */
+let postExitAction: (() => Promise<void>) | null = null;
+
+export async function runTui(): Promise<void> {
   const paths = resolvePaths();
-  render(<App paths={paths} />);
-  // Print queued message after Ink finishes unmounting. The 'exit' event
-  // fires synchronously right before process exit.
-  process.on('exit', () => {
-    if (postExitMessage) {
-      process.stdout.write('\n' + postExitMessage + '\n');
-    }
-  });
+  const inkInstance = render(<App paths={paths} />);
+  await inkInstance.waitUntilExit();
+  if (postExitMessage) {
+    process.stdout.write('\n' + postExitMessage + '\n');
+  }
+  if (postExitAction) {
+    await postExitAction();
+  }
 }

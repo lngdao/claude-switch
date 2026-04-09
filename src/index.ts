@@ -12,7 +12,7 @@ async function main(): Promise<void> {
   // No args + interactive TTY → launch TUI
   if (argv.length === 0 && process.stdout.isTTY) {
     const { runTui } = await import('./cli/tui.js');
-    runTui();
+    await runTui();
     return;
   }
 
