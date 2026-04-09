@@ -33,6 +33,7 @@ import {
   type AliasStatus,
   type ShellName,
 } from '../core/alias.js';
+import { TWEAKS, type TweakStatus } from '../core/tweaks.js';
 import { existsSync } from 'node:fs';
 import { timeAgo } from './format.js';
 
@@ -53,7 +54,13 @@ type Mode =
   | { kind: 'doctor'; loading: boolean; results: CheckResult[]; probe: boolean }
   | { kind: 'init'; step: InitStep; draft: InitDraft }
   | { kind: 'probing'; name: string }
-  | { kind: 'alias'; statuses: AliasStatus[]; aliasName: string; editingName: boolean };
+  | { kind: 'alias'; statuses: AliasStatus[]; aliasName: string; editingName: boolean }
+  | {
+      kind: 'tweaks';
+      statuses: Array<{ id: string; title: string; description: string; status: TweakStatus }>;
+      cursor: number;
+      busy: boolean;
+    };
 
 type NewStep = 'name' | 'scheme' | 'token' | 'baseUrl' | 'extras' | 'review';
 type NewDraft = {
@@ -224,6 +231,57 @@ function App({ paths }: AppProps) {
 
     if (mode.kind === 'probing') {
       // ignore input while probing
+      return;
+    }
+
+    if (mode.kind === 'tweaks') {
+      if (mode.busy) return;
+      if (key.escape || inputCh === 'q') {
+        setMode({ kind: 'list' });
+        return;
+      }
+      if (key.upArrow || inputCh === 'k') {
+        setMode({ ...mode, cursor: Math.max(0, mode.cursor - 1) });
+        return;
+      }
+      if (key.downArrow || inputCh === 'j') {
+        setMode({
+          ...mode,
+          cursor: Math.min(mode.statuses.length - 1, mode.cursor + 1),
+        });
+        return;
+      }
+      if (key.return || inputCh === 'a') {
+        const target = mode.statuses[mode.cursor];
+        if (!target) return;
+        const tweak = TWEAKS.find((t) => t.id === target.id);
+        if (!tweak) return;
+        setMode({ ...mode, busy: true });
+        tweak
+          .apply(paths)
+          .then(async (summary) => {
+            const refreshed = await Promise.all(
+              TWEAKS.map(async (t) => ({
+                id: t.id,
+                title: t.title,
+                description: t.description,
+                status: await t.status(paths),
+              })),
+            );
+            setMode({
+              kind: 'tweaks',
+              statuses: refreshed,
+              cursor: mode.cursor,
+              busy: false,
+            });
+            setToast({ msg: `${target.id}: ${summary}`, tone: 'ok' });
+          })
+          .catch((e) => {
+            setMode({ ...mode, busy: false });
+            setToast({ msg: (e as Error).message, tone: 'err' });
+          });
+        return;
+      }
       return;
     }
 
@@ -428,6 +486,20 @@ function App({ paths }: AppProps) {
       });
       return;
     }
+    if (inputCh === 'T') {
+      // Snapshot tweak statuses synchronously to render immediately
+      Promise.all(
+        TWEAKS.map(async (t) => ({
+          id: t.id,
+          title: t.title,
+          description: t.description,
+          status: await t.status(paths),
+        })),
+      ).then((statuses) => {
+        setMode({ kind: 'tweaks', statuses, cursor: 0, busy: false });
+      });
+      return;
+    }
     if (inputCh === 'i') {
       // Pre-fill from local ~/.claude.json if available
       const local = readLocalOauthAccount(paths);
@@ -572,6 +644,10 @@ function App({ paths }: AppProps) {
         onToast={(msg, tone) => setToast({ msg, tone })}
       />
     );
+  }
+
+  if (mode.kind === 'tweaks') {
+    return <TweaksScreen mode={mode} />;
   }
 
   return (
@@ -750,8 +826,8 @@ function Footer({ mode }: { mode: Mode }) {
         ↑↓ profile · ←→ env · enter switch · c copy · p probe
       </Text>
       <Text dimColor>
-        n new · e edit · R rename · C clone · d delete · D doctor · i init · A
-        alias · r refresh · ? help · q quit
+        n new · e edit · R rename · C clone · d delete · D doctor · i init · T
+        tweaks · A alias · r refresh · ? help · q quit
       </Text>
     </Box>
   );
@@ -780,6 +856,7 @@ function HelpScreen() {
       <Text>  p        Probe selected profile against api.anthropic.com</Text>
       <Text>  c        Copy selected env value to clipboard (unmasked)</Text>
       <Text>  A        Shell alias installer (bash/zsh/fish)</Text>
+      <Text>  T        Tweaks (bypass onboarding, opus[1m], …)</Text>
       <Text> </Text>
       <Text bold color="cyan">Misc</Text>
       <Text>  r        Refresh from disk</Text>
@@ -1531,6 +1608,53 @@ function AliasScreen({
         void onToast;
         return null;
       })()}
+    </Box>
+  );
+}
+
+// ─── Tweaks screen ────────────────────────────────────────
+
+function TweaksScreen({
+  mode,
+}: {
+  mode: Extract<Mode, { kind: 'tweaks' }>;
+}) {
+  return (
+    <Box flexDirection="column" padding={1}>
+      <Text bold color="cyan">
+        Tweaks {mode.busy ? '(applying…)' : ''}
+      </Text>
+      <Text dimColor>
+        Quick config tricks for Claude Code (bypass onboarding, opus[1m], …)
+      </Text>
+      <Text> </Text>
+      {mode.statuses.map((s, i) => {
+        const isCursor = i === mode.cursor;
+        const icon =
+          s.status === 'applied'
+            ? { glyph: '●', color: 'green' as const }
+            : s.status === 'not-applied'
+              ? { glyph: '○', color: undefined }
+              : { glyph: '?', color: 'yellow' as const };
+        return (
+          <Box key={s.id} flexDirection="column">
+            <Text>
+              <Text color={isCursor ? 'cyan' : undefined}>
+                {isCursor ? '› ' : '  '}
+              </Text>
+              <Text color={icon.color} dimColor={!icon.color}>
+                {icon.glyph}{' '}
+              </Text>
+              <Text bold>{s.id}</Text>
+              <Text dimColor>  {s.status}</Text>
+            </Text>
+            <Text>    {s.title}</Text>
+            <Text dimColor>    {s.description}</Text>
+            <Text> </Text>
+          </Box>
+        );
+      })}
+      <Text dimColor>↑↓ nav · enter/a apply selected · q/Esc back</Text>
     </Box>
   );
 }

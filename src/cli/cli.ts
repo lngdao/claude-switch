@@ -11,6 +11,9 @@ import {
   cmdDoctor,
   cmdEdit,
   cmdExport,
+  cmdTweakApply,
+  cmdTweakList,
+  cmdTweakStatus,
   cmdImport,
   cmdInit,
   cmdLs,
@@ -207,6 +210,27 @@ export function buildCli(): Command {
     .description('show shell alias installation status')
     .action(async (_o, cmd) => {
       process.exit(await cmdAliasStatus(getGlobal(cmd)));
+    });
+
+  // tweak — apply opinionated tricks / config patches
+  const tweak = program.command('tweak').description('apply quick config tweaks (bypass onboarding, opus[1m], …)');
+  tweak
+    .command('list')
+    .description('list available tweaks and their status')
+    .action(async (_o, cmd) => {
+      process.exit(await cmdTweakList(getGlobal(cmd)));
+    });
+  tweak
+    .command('apply <id>')
+    .description('apply a tweak by id')
+    .action(async (id, _o, cmd) => {
+      process.exit(await cmdTweakApply(getGlobal(cmd), id));
+    });
+  tweak
+    .command('status [id]')
+    .description('show status of one or all tweaks')
+    .action(async (id, _o, cmd) => {
+      process.exit(await cmdTweakStatus(getGlobal(cmd), id));
     });
 
   // init

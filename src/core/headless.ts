@@ -1,9 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { ClaudeJsonSchema, type OauthAccount } from './schema.js';
 import { writeJsonAtomic } from './fs-safe.js';
 import { writeProfile } from './profile.js';
 import { AUTH_KEYS, checkTokenPrefix } from './scheme.js';
 import type { Paths } from './paths.js';
+
+const pExecFile = promisify(execFile);
 
 export interface InitInput {
   token: string;
@@ -15,6 +19,96 @@ export interface InitInput {
 export interface InitResult {
   claudeJsonPath: string;
   profileName: string;
+}
+
+export interface BypassResult {
+  path: string;
+  action: 'created' | 'updated' | 'noop';
+  version: string;
+  /** Other top-level keys that were preserved (for transparency). */
+  preservedKeys: string[];
+}
+
+/**
+ * Toggle the onboarding bypass flag in `~/.claude.json`.
+ *
+ * This is intentionally narrow: it only sets `hasCompletedOnboarding: true`
+ * and `lastOnboardingVersion`. Existing fields (including `oauthAccount`) are
+ * preserved untouched. It does NOT require a token and does NOT modify any
+ * profile.
+ *
+ * If `version` is omitted we try to detect it from `claude --version`. If
+ * neither is available we fall back to an empty string and let the caller
+ * decide whether to surface a warning.
+ */
+export async function bypassOnboarding(
+  paths: Paths,
+  version?: string,
+): Promise<BypassResult> {
+  // Read existing JSON if present (preserve everything else).
+  let existing: Record<string, unknown> = {};
+  let existed = false;
+  if (existsSync(paths.claudeJson)) {
+    existed = true;
+    try {
+      existing = JSON.parse(readFileSync(paths.claudeJson, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      // Corrupt file — start over but treat as 'created'
+      existing = {};
+      existed = false;
+    }
+  }
+
+  const resolvedVersion = version ?? (await detectClaudeVersion()) ?? '';
+
+  const wasAlreadyBypassed =
+    existing.hasCompletedOnboarding === true &&
+    (resolvedVersion === '' ||
+      existing.lastOnboardingVersion === resolvedVersion);
+
+  const next: Record<string, unknown> = {
+    ...existing,
+    hasCompletedOnboarding: true,
+  };
+  if (resolvedVersion) {
+    next.lastOnboardingVersion = resolvedVersion;
+  }
+
+  if (wasAlreadyBypassed) {
+    return {
+      path: paths.claudeJson,
+      action: 'noop',
+      version: resolvedVersion,
+      preservedKeys: Object.keys(existing).filter(
+        (k) => k !== 'hasCompletedOnboarding' && k !== 'lastOnboardingVersion',
+      ),
+    };
+  }
+
+  writeJsonAtomic(paths.claudeJson, next, { mode: 0o600 });
+
+  return {
+    path: paths.claudeJson,
+    action: existed ? 'updated' : 'created',
+    version: resolvedVersion,
+    preservedKeys: Object.keys(existing).filter(
+      (k) => k !== 'hasCompletedOnboarding' && k !== 'lastOnboardingVersion',
+    ),
+  };
+}
+
+async function detectClaudeVersion(): Promise<string | null> {
+  try {
+    const result = await pExecFile('claude', ['--version'], { timeout: 2000 });
+    const out = (result.stdout || result.stderr || '').trim();
+    const match = out.match(/(\d+\.\d+\.\d+(?:[-+][\w.]+)?)/);
+    return match ? match[1]! : null;
+  } catch {
+    return null;
+  }
 }
 
 export function readLocalOauthAccount(paths: Paths): OauthAccount | null {

@@ -4,7 +4,7 @@
   "description": "TUI + CLI to manage Claude Code auth profiles (OAuth tokens, API keys, proxies) and headless setup",
   "type": "module",
   "bin": {
-    "claude-switch": "./dist/index.js"
+    "claude-switch": "dist/index.js"
   },
   "files": [
     "dist",
@@ -15,8 +15,7 @@
     "node": ">=20"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "repository": {
     "type": "git",

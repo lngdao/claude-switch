@@ -44,6 +44,7 @@ import {
   uninstallAlias,
   type ShellName,
 } from '../core/alias.js';
+import { TWEAKS, getTweak } from '../core/tweaks.js';
 import { writeJsonAtomic } from '../core/fs-safe.js';
 import type { Paths } from '../core/paths.js';
 import {
@@ -764,6 +765,82 @@ export async function cmdAliasStatus(opts: GlobalOpts): Promise<number> {
   }
   console.log('');
   return 0;
+}
+
+// ─── tweak ───────────────────────────────────────────────
+
+export async function cmdTweakList(opts: GlobalOpts): Promise<number> {
+  if (opts.json) {
+    const rows = await Promise.all(
+      TWEAKS.map(async (t) => ({
+        id: t.id,
+        title: t.title,
+        description: t.description,
+        status: await t.status(opts.paths),
+      })),
+    );
+    console.log(JSON.stringify(rows, null, 2));
+    return 0;
+  }
+  console.log('');
+  for (const t of TWEAKS) {
+    const s = await t.status(opts.paths);
+    const icon =
+      s === 'applied' ? c.green('●') : s === 'not-applied' ? c.dim('○') : c.yellow('?');
+    console.log(`  ${icon} ${c.bold(t.id)}  ${c.dim(s)}`);
+    console.log(`    ${t.title}`);
+    console.log(c.dim(`    ${t.description}`));
+    console.log('');
+  }
+  return 0;
+}
+
+export async function cmdTweakApply(
+  opts: GlobalOpts,
+  id: string,
+): Promise<number> {
+  const tweak = getTweak(id);
+  if (!tweak) {
+    console.error(c.red(`Unknown tweak: ${id}`));
+    console.error(c.dim(`Available: ${TWEAKS.map((t) => t.id).join(', ')}`));
+    return 1;
+  }
+  if (!opts.yes) {
+    const ok = await confirm({
+      message: `Apply '${tweak.title}'?`,
+      default: true,
+    });
+    if (!ok) return 0;
+  }
+  try {
+    const summary = await tweak.apply(opts.paths);
+    console.log(c.green(`✓ ${id}: ${summary}`));
+    return 0;
+  } catch (e) {
+    console.error(c.red(`✗ ${id}: ${(e as Error).message}`));
+    return 1;
+  }
+}
+
+export async function cmdTweakStatus(
+  opts: GlobalOpts,
+  id?: string,
+): Promise<number> {
+  if (id) {
+    const tweak = getTweak(id);
+    if (!tweak) {
+      console.error(c.red(`Unknown tweak: ${id}`));
+      return 1;
+    }
+    const s = await tweak.status(opts.paths);
+    if (opts.json) {
+      console.log(JSON.stringify({ id, status: s }, null, 2));
+    } else {
+      console.log(`${id}: ${s}`);
+    }
+    return 0;
+  }
+  return cmdTweakList(opts);
 }
 
 // for unused detection if needed
