@@ -160,6 +160,8 @@ The installer writes a marker block to `~/.bashrc` / `~/.zshrc` / `~/.config/fis
 | `R` | Rename selected profile |
 | `C` | Clone selected profile |
 | `d` | Delete selected profile (confirm) |
+| `I` | Import a profile from a JSON file |
+| `E` | Export selected profile to a JSON file |
 | `D` | Open the doctor screen (re-probe with `p`, auto-fix perms with `f`) |
 | `i` | Init wizard (`~/.claude.json` + first profile, prefilled from local if available) |
 | `p` | Probe selected profile against `api.anthropic.com` |
