@@ -51,6 +51,7 @@ import {
   installCommand,
   performUpdate,
   readSelfPackage,
+  refreshUpdateCache,
   type PackageManager,
 } from '../core/update-check.js';
 import { writeJsonAtomic } from '../core/fs-safe.js';
@@ -889,15 +890,19 @@ export async function cmdUpdate(
     return 1;
   }
 
-  // --check just reports cached status without installing
+  // --check forces a fresh registry fetch (with a tight timeout) so the
+  // user gets an authoritative answer rather than possibly-stale cache.
   if (flags.check) {
-    const info = cachedUpdateInfo();
+    let info = cachedUpdateInfo();
+    if (!info) {
+      info = await refreshUpdateCache(5000);
+    }
     if (opts.json) {
       console.log(
         JSON.stringify(
           {
             current: pkg.version,
-            latest: info?.latest ?? null,
+            latest: info?.latest ?? pkg.version,
             hasUpdate: !!info,
             type: info?.type ?? null,
           },
@@ -914,13 +919,15 @@ export async function cmdUpdate(
       console.log(c.dim('Run `claude-switch update` to install.'));
     } else {
       console.log(`${c.green('✓')} ${c.bold(pkg.name)}@${pkg.version} is up to date.`);
-      console.log(c.dim('(based on cached check; may be stale up to 24h)'));
     }
     return 0;
   }
 
   const pm = (flags.pm as PackageManager | undefined) ?? detectPackageManager();
-  const info = cachedUpdateInfo();
+  let info = cachedUpdateInfo();
+  if (!info) {
+    info = await refreshUpdateCache(5000);
+  }
 
   if (!info && !flags.force) {
     console.log(`${c.green('✓')} ${c.bold(pkg.name)}@${pkg.version} appears up to date.`);

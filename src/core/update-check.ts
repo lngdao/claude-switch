@@ -1,8 +1,9 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { spawn } from 'node:child_process';
-import updateNotifier from 'update-notifier';
 import { confirm } from '@inquirer/prompts';
 import kleur from 'kleur';
 
@@ -16,16 +17,26 @@ interface PackageJson {
 export interface UpdateInfo {
   current: string;
   latest: string;
-  type: 'patch' | 'minor' | 'major' | 'prerelease' | 'build' | 'unknown';
+  type: 'patch' | 'minor' | 'major' | 'unknown';
   name: string;
 }
 
-/**
- * Read this package's own package.json. After bundling, dist/index.js sits
- * one level below the package root, so '../package.json' is correct in both
- * dev (./dist/index.js) and npm-installed (.../node_modules/<pkg>/dist/...)
- * layouts.
- */
+interface CacheData {
+  /** Version that performed the check (used to invalidate when downgraded). */
+  current: string;
+  /** Latest version observed from the npm registry. May equal `current`. */
+  latest: string | null;
+  /** Unix ms when this cache entry was written. */
+  checkedAt: number;
+}
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+const CACHE_DIR = join(homedir(), '.config', 'claude-switch');
+const CACHE_FILE = join(CACHE_DIR, 'update-check.json');
+
+// ─── Self package info ────────────────────────────────────
+
 export function readSelfPackage(): PackageJson | null {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
@@ -46,52 +57,146 @@ export function readSelfPackage(): PackageJson | null {
   return null;
 }
 
-const ONE_DAY_MS = 1000 * 60 * 60 * 24;
+// ─── Cache I/O ────────────────────────────────────────────
 
-/**
- * Read cached update info if any, and kick off a background fetch so the
- * next invocation has fresh data. Returns null if there's no cached update
- * or if checks are disabled.
- */
-export function cachedUpdateInfo(): UpdateInfo | null {
-  if (process.env.CLAUDE_SWITCH_NO_UPDATE_CHECK === '1') return null;
-  if (process.env.NO_UPDATE_NOTIFIER === '1') return null;
-  const pkg = readSelfPackage();
-  if (!pkg?.name || !pkg.version) return null;
-
+function readCache(): CacheData | null {
+  if (!existsSync(CACHE_FILE)) return null;
   try {
-    const notifier = updateNotifier({
-      pkg: { name: pkg.name, version: pkg.version },
-      updateCheckInterval: ONE_DAY_MS,
-      shouldNotifyInNpmScript: false,
-    });
-    if (!notifier.update) return null;
-    const u = notifier.update;
-    return {
-      current: u.current,
-      latest: u.latest,
-      type: (u.type as UpdateInfo['type']) ?? 'unknown',
-      name: pkg.name,
-    };
+    const raw = readFileSync(CACHE_FILE, 'utf8');
+    const data = JSON.parse(raw) as CacheData;
+    if (typeof data.current !== 'string' || typeof data.checkedAt !== 'number') {
+      return null;
+    }
+    return data;
   } catch {
     return null;
   }
 }
 
-// ─── Package-manager detection ─────────────────────────────
+function writeCache(data: CacheData): void {
+  try {
+    if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
+    writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2), 'utf8');
+  } catch {
+    /* swallow */
+  }
+}
+
+// ─── Version comparison (date-based YYYY.MMDD.N safe) ─────
+
+/**
+ * Compare two dot-separated numeric versions component-by-component.
+ * Returns true iff `latest` is strictly greater than `current`.
+ *
+ * Works correctly for both classic semver (1.2.3 vs 1.2.10) and our
+ * date-based scheme (2026.410.4 vs 2026.410.10).
+ */
+export function isNewer(latest: string, current: string): boolean {
+  const a = current.split('.').map((n) => parseInt(n, 10) || 0);
+  const b = latest.split('.').map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (y > x) return true;
+    if (y < x) return false;
+  }
+  return false;
+}
+
+function classifyDiff(current: string, latest: string): UpdateInfo['type'] {
+  const a = current.split('.').map((n) => parseInt(n, 10) || 0);
+  const b = latest.split('.').map((n) => parseInt(n, 10) || 0);
+  if ((b[0] ?? 0) !== (a[0] ?? 0)) return 'major';
+  if ((b[1] ?? 0) !== (a[1] ?? 0)) return 'minor';
+  if ((b[2] ?? 0) !== (a[2] ?? 0)) return 'patch';
+  return 'unknown';
+}
+
+// ─── Registry fetch ───────────────────────────────────────
+
+async function fetchLatestVersion(
+  packageName: string,
+  timeoutMs = 3000,
+): Promise<string | null> {
+  const url = `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%40', '@')}/latest`;
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { accept: 'application/json' },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { version?: string } | undefined;
+    return data?.version ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ─── Public API ───────────────────────────────────────────
+
+/**
+ * Synchronously read cached update info if it's fresh and for the SAME
+ * current version we're running. Returns null if cache is missing, stale,
+ * was written by a different version, or doesn't show a newer release.
+ */
+export function cachedUpdateInfo(): UpdateInfo | null {
+  if (process.env.CLAUDE_SWITCH_NO_UPDATE_CHECK === '1') return null;
+  const pkg = readSelfPackage();
+  if (!pkg?.name || !pkg.version) return null;
+
+  const cache = readCache();
+  if (!cache) return null;
+  // Cache is invalid for THIS process if it was written by a different version
+  if (cache.current !== pkg.version) return null;
+  if (Date.now() - cache.checkedAt > ONE_DAY_MS) return null;
+  if (!cache.latest || !isNewer(cache.latest, pkg.version)) return null;
+
+  return {
+    current: pkg.version,
+    latest: cache.latest,
+    type: classifyDiff(pkg.version, cache.latest),
+    name: pkg.name,
+  };
+}
+
+/**
+ * Refresh the cache by hitting the npm registry. Returns the freshly-fetched
+ * UpdateInfo if a newer version is available, otherwise null. Always writes
+ * the result to cache (even when there's no update) to suppress re-checks
+ * for ONE_DAY_MS.
+ */
+export async function refreshUpdateCache(
+  timeoutMs = 3000,
+): Promise<UpdateInfo | null> {
+  const pkg = readSelfPackage();
+  if (!pkg?.name || !pkg.version) return null;
+
+  const latest = await fetchLatestVersion(pkg.name, timeoutMs);
+  writeCache({
+    current: pkg.version,
+    latest,
+    checkedAt: Date.now(),
+  });
+
+  if (!latest || !isNewer(latest, pkg.version)) return null;
+  return {
+    current: pkg.version,
+    latest,
+    type: classifyDiff(pkg.version, latest),
+    name: pkg.name,
+  };
+}
+
+// ─── Package-manager detection ────────────────────────────
 
 export type PackageManager = 'npm' | 'pnpm' | 'yarn' | 'bun';
 
-/**
- * Heuristically detect which package manager installed this binary so the
- * upgrade command matches. Falls back to npm.
- */
 export function detectPackageManager(): PackageManager {
   const bin = process.argv[1] ?? '';
   if (bin.includes('/.bun/')) return 'bun';
   if (bin.includes('/Library/pnpm/') || bin.includes('/.pnpm/')) return 'pnpm';
   if (bin.includes('/.yarn/') || bin.includes('/yarn/global/')) return 'yarn';
-  // Fall back to environment hints from npm-style invocations
   const ua = process.env.npm_config_user_agent ?? '';
   if (ua.startsWith('pnpm')) return 'pnpm';
   if (ua.startsWith('yarn')) return 'yarn';
@@ -116,8 +221,6 @@ export function installCommand(
   }
 }
 
-// ─── Update execution ──────────────────────────────────────
-
 export interface PerformUpdateOptions {
   pm?: PackageManager;
 }
@@ -129,19 +232,12 @@ export async function performUpdate(
   const pm = opts.pm ?? detectPackageManager();
   const { cmd, args } = installCommand(pm, pkgName);
 
-  process.stdout.write(
-    kleur.cyan(`→ ${cmd} ${args.join(' ')}\n`),
-  );
+  process.stdout.write(kleur.cyan(`→ ${cmd} ${args.join(' ')}\n`));
 
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      stdio: 'inherit',
-      env: process.env,
-    });
+    const child = spawn(cmd, args, { stdio: 'inherit', env: process.env });
     child.on('error', (e) => {
-      process.stderr.write(
-        kleur.red(`Failed to run ${cmd}: ${e.message}\n`),
-      );
+      process.stderr.write(kleur.red(`Failed to run ${cmd}: ${e.message}\n`));
       resolve({ ok: false, pm, code: null });
     });
     child.on('exit', (code) => {
@@ -150,17 +246,15 @@ export async function performUpdate(
   });
 }
 
-// ─── Auto-update prompt ────────────────────────────────────
+// ─── Auto-update prompt ───────────────────────────────────
 
 /**
- * Called near the very top of main(). If a cached update exists and we're
- * running interactively, ask the user whether to install it now. If they
- * say yes, run the install and exit (the running process is using the old
- * code; we tell the user to re-run rather than try to re-exec ourselves).
+ * Called near the very top of main(). On the first interactive call after
+ * install, performs a synchronous registry check (with a 3-second timeout).
+ * On subsequent calls, uses the cached result.
  *
- * Returns true if the prompt fired AND the user chose to update — caller
- * should NOT continue with the user's original command in that case
- * (we exit from inside this function).
+ * If a newer version is available and the user says yes, runs the install
+ * and exits the process.
  *
  * Skipped automatically when:
  *  - CLAUDE_SWITCH_NO_UPDATE_CHECK=1 or NO_UPDATE_NOTIFIER=1
@@ -173,8 +267,6 @@ export async function maybePromptForUpdate(argv: string[]): Promise<void> {
   if (process.env.CI === 'true') return;
   if (!process.stdin.isTTY || !process.stdout.isTTY) return;
 
-  // Skip the prompt for non-interactive flag combos so scripts aren't
-  // surprised by an unexpected question.
   if (
     argv.includes('--json') ||
     argv.includes('-y') ||
@@ -184,12 +276,25 @@ export async function maybePromptForUpdate(argv: string[]): Promise<void> {
   ) {
     return;
   }
-  // Skip when the user is already asking us to update / check status
   if (argv[0] === 'update' || argv[0] === '--version' || argv[0] === '-V') {
     return;
   }
 
-  const info = cachedUpdateInfo();
+  // 1. Try the cache (instant, no network)
+  let info = cachedUpdateInfo();
+
+  // 2. If cache miss/stale, do a synchronous fetch with a tight timeout
+  if (!info) {
+    const cache = readCache();
+    const stale =
+      !cache ||
+      cache.current !== readSelfPackage()?.version ||
+      Date.now() - cache.checkedAt > ONE_DAY_MS;
+    if (stale) {
+      info = await refreshUpdateCache(3000);
+    }
+  }
+
   if (!info) return;
 
   printUpdateBanner(info);
@@ -201,7 +306,6 @@ export async function maybePromptForUpdate(argv: string[]): Promise<void> {
       default: true,
     });
   } catch {
-    // User pressed Ctrl-C or prompt was rejected — treat as "no"
     return;
   }
   if (!answer) {
@@ -219,12 +323,11 @@ export async function maybePromptForUpdate(argv: string[]): Promise<void> {
         kleur.dim('  Re-run your command to use the new version.\n'),
     );
   } else {
+    const { cmd, args } = installCommand(result.pm, info.name);
     process.stdout.write(
       '\n' +
         kleur.red(`✗ Update failed (exit ${result.code}).\n`) +
-        kleur.dim(
-          `  Try manually: ${installCommand(result.pm, info.name).cmd} ${installCommand(result.pm, info.name).args.join(' ')}\n`,
-        ),
+        kleur.dim(`  Try manually: ${cmd} ${args.join(' ')}\n`),
     );
   }
   process.exit(result.ok ? 0 : 1);
