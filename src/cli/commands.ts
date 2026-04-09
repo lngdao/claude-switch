@@ -46,12 +46,11 @@ import {
 } from '../core/alias.js';
 import { TWEAKS, getTweak } from '../core/tweaks.js';
 import {
-  cachedUpdateInfo,
+  checkUpdate,
   detectPackageManager,
   installCommand,
   performUpdate,
   readSelfPackage,
-  refreshUpdateCache,
   type PackageManager,
 } from '../core/update-check.js';
 import { writeJsonAtomic } from '../core/fs-safe.js';
@@ -890,13 +889,9 @@ export async function cmdUpdate(
     return 1;
   }
 
-  // --check forces a fresh registry fetch (with a tight timeout) so the
-  // user gets an authoritative answer rather than possibly-stale cache.
+  // --check fetches the latest version from npm and reports without installing
   if (flags.check) {
-    let info = cachedUpdateInfo();
-    if (!info) {
-      info = await refreshUpdateCache(5000);
-    }
+    const info = await checkUpdate(5000);
     if (opts.json) {
       console.log(
         JSON.stringify(
@@ -924,10 +919,7 @@ export async function cmdUpdate(
   }
 
   const pm = (flags.pm as PackageManager | undefined) ?? detectPackageManager();
-  let info = cachedUpdateInfo();
-  if (!info) {
-    info = await refreshUpdateCache(5000);
-  }
+  const info = await checkUpdate(5000);
 
   if (!info && !flags.force) {
     console.log(`${c.green('✓')} ${c.bold(pkg.name)}@${pkg.version} appears up to date.`);

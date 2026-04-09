@@ -1,13 +1,9 @@
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { confirm } from '@inquirer/prompts';
 import kleur from 'kleur';
-
-const require = createRequire(import.meta.url);
 
 interface PackageJson {
   name: string;
@@ -21,35 +17,22 @@ export interface UpdateInfo {
   name: string;
 }
 
-interface CacheData {
-  /** Version that performed the check (used to invalidate when downgraded). */
-  current: string;
-  /** Latest version observed from the npm registry. May equal `current`. */
-  latest: string | null;
-  /** Unix ms when this cache entry was written. */
-  checkedAt: number;
-}
-
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
-const CACHE_DIR = join(homedir(), '.config', 'claude-switch');
-const CACHE_FILE = join(CACHE_DIR, 'update-check.json');
-
 // ─── Self package info ────────────────────────────────────
 
-export function readSelfPackage(): PackageJson | null {
+/**
+ * Walk up from this file looking for the closest package.json. This works
+ * regardless of bundling, symlinks, or how deep into node_modules the bundle
+ * lives — same approach OpenACP uses (`src/cli/version.ts:findPackageJson`).
+ */
+function findPackageJson(): string | null {
   try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    const candidates = [
-      join(here, '..', 'package.json'),
-      join(here, '..', '..', 'package.json'),
-    ];
-    for (const path of candidates) {
-      try {
-        return require(path) as PackageJson;
-      } catch {
-        /* try next */
-      }
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 5; i++) {
+      const candidate = join(dir, 'package.json');
+      if (existsSync(candidate)) return candidate;
+      const parent = resolve(dir, '..');
+      if (parent === dir) break;
+      dir = parent;
     }
   } catch {
     /* swallow */
@@ -57,39 +40,21 @@ export function readSelfPackage(): PackageJson | null {
   return null;
 }
 
-// ─── Cache I/O ────────────────────────────────────────────
-
-function readCache(): CacheData | null {
-  if (!existsSync(CACHE_FILE)) return null;
+export function readSelfPackage(): PackageJson | null {
+  const path = findPackageJson();
+  if (!path) return null;
   try {
-    const raw = readFileSync(CACHE_FILE, 'utf8');
-    const data = JSON.parse(raw) as CacheData;
-    if (typeof data.current !== 'string' || typeof data.checkedAt !== 'number') {
-      return null;
-    }
-    return data;
+    return JSON.parse(readFileSync(path, 'utf8')) as PackageJson;
   } catch {
     return null;
-  }
-}
-
-function writeCache(data: CacheData): void {
-  try {
-    if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true });
-    writeFileSync(CACHE_FILE, JSON.stringify(data, null, 2), 'utf8');
-  } catch {
-    /* swallow */
   }
 }
 
 // ─── Version comparison (date-based YYYY.MMDD.N safe) ─────
 
 /**
- * Compare two dot-separated numeric versions component-by-component.
  * Returns true iff `latest` is strictly greater than `current`.
- *
- * Works correctly for both classic semver (1.2.3 vs 1.2.10) and our
- * date-based scheme (2026.410.4 vs 2026.410.10).
+ * Works for both classic semver and the date-based YYYY.MMDD.N scheme.
  */
 export function isNewer(latest: string, current: string): boolean {
   const a = current.split('.').map((n) => parseInt(n, 10) || 0);
@@ -115,11 +80,11 @@ function classifyDiff(current: string, latest: string): UpdateInfo['type'] {
 
 // ─── Registry fetch ───────────────────────────────────────
 
-async function fetchLatestVersion(
+export async function fetchLatestVersion(
   packageName: string,
-  timeoutMs = 3000,
+  timeoutMs = 5000,
 ): Promise<string | null> {
-  const url = `https://registry.npmjs.org/${encodeURIComponent(packageName).replace('%40', '@')}/latest`;
+  const url = `https://registry.npmjs.org/${packageName}/latest`;
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(timeoutMs),
@@ -133,52 +98,16 @@ async function fetchLatestVersion(
   }
 }
 
-// ─── Public API ───────────────────────────────────────────
-
 /**
- * Synchronously read cached update info if it's fresh and for the SAME
- * current version we're running. Returns null if cache is missing, stale,
- * was written by a different version, or doesn't show a newer release.
+ * Synchronously fetch the latest version and compare to the running one.
+ * Always hits the npm registry — no caching, so there are no stale-cache
+ * surprises. Returns null when offline, the package isn't found, or there's
+ * no newer version available.
  */
-export function cachedUpdateInfo(): UpdateInfo | null {
-  if (process.env.CLAUDE_SWITCH_NO_UPDATE_CHECK === '1') return null;
+export async function checkUpdate(timeoutMs = 5000): Promise<UpdateInfo | null> {
   const pkg = readSelfPackage();
   if (!pkg?.name || !pkg.version) return null;
-
-  const cache = readCache();
-  if (!cache) return null;
-  // Cache is invalid for THIS process if it was written by a different version
-  if (cache.current !== pkg.version) return null;
-  if (Date.now() - cache.checkedAt > ONE_DAY_MS) return null;
-  if (!cache.latest || !isNewer(cache.latest, pkg.version)) return null;
-
-  return {
-    current: pkg.version,
-    latest: cache.latest,
-    type: classifyDiff(pkg.version, cache.latest),
-    name: pkg.name,
-  };
-}
-
-/**
- * Refresh the cache by hitting the npm registry. Returns the freshly-fetched
- * UpdateInfo if a newer version is available, otherwise null. Always writes
- * the result to cache (even when there's no update) to suppress re-checks
- * for ONE_DAY_MS.
- */
-export async function refreshUpdateCache(
-  timeoutMs = 3000,
-): Promise<UpdateInfo | null> {
-  const pkg = readSelfPackage();
-  if (!pkg?.name || !pkg.version) return null;
-
   const latest = await fetchLatestVersion(pkg.name, timeoutMs);
-  writeCache({
-    current: pkg.version,
-    latest,
-    checkedAt: Date.now(),
-  });
-
   if (!latest || !isNewer(latest, pkg.version)) return null;
   return {
     current: pkg.version,
@@ -234,14 +163,24 @@ export async function performUpdate(
 
   process.stdout.write(kleur.cyan(`→ ${cmd} ${args.join(' ')}\n`));
 
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: 'inherit', env: process.env });
+  return new Promise((resolveSpawn) => {
+    const child = spawn(cmd, args, { stdio: 'inherit', env: process.env, shell: true });
+    const onSignal = () => {
+      child.kill('SIGTERM');
+      resolveSpawn({ ok: false, pm, code: null });
+    };
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
     child.on('error', (e) => {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
       process.stderr.write(kleur.red(`Failed to run ${cmd}: ${e.message}\n`));
-      resolve({ ok: false, pm, code: null });
+      resolveSpawn({ ok: false, pm, code: null });
     });
-    child.on('exit', (code) => {
-      resolve({ ok: code === 0, pm, code });
+    child.on('close', (code) => {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+      resolveSpawn({ ok: code === 0, pm, code });
     });
   });
 }
@@ -249,16 +188,15 @@ export async function performUpdate(
 // ─── Auto-update prompt ───────────────────────────────────
 
 /**
- * Called near the very top of main(). On the first interactive call after
- * install, performs a synchronous registry check (with a 3-second timeout).
- * On subsequent calls, uses the cached result.
- *
- * If a newer version is available and the user says yes, runs the install
- * and exits the process.
+ * Called near the very top of main(). Hits the npm registry to check for a
+ * newer version on every interactive invocation — no caching, so there are
+ * no stale-state surprises. If a newer version is available, shows a prompt;
+ * confirming spawns the install command and exits the process.
  *
  * Skipped automatically when:
- *  - CLAUDE_SWITCH_NO_UPDATE_CHECK=1 or NO_UPDATE_NOTIFIER=1
+ *  - CLAUDE_SWITCH_NO_UPDATE_CHECK=1 or NO_UPDATE_NOTIFIER=1 is set
  *  - stdin is not a TTY (scripted/CI use)
+ *  - the version looks like a development build
  *  - the invoked command is the update command itself, --json, --yes, etc.
  */
 export async function maybePromptForUpdate(argv: string[]): Promise<void> {
@@ -280,21 +218,10 @@ export async function maybePromptForUpdate(argv: string[]): Promise<void> {
     return;
   }
 
-  // 1. Try the cache (instant, no network)
-  let info = cachedUpdateInfo();
+  const pkg = readSelfPackage();
+  if (!pkg?.version || pkg.version === '0.0.0' || pkg.version.endsWith('-dev')) return;
 
-  // 2. If cache miss/stale, do a synchronous fetch with a tight timeout
-  if (!info) {
-    const cache = readCache();
-    const stale =
-      !cache ||
-      cache.current !== readSelfPackage()?.version ||
-      Date.now() - cache.checkedAt > ONE_DAY_MS;
-    if (stale) {
-      info = await refreshUpdateCache(3000);
-    }
-  }
-
+  const info = await checkUpdate(3000);
   if (!info) return;
 
   printUpdateBanner(info);
