@@ -1,6 +1,6 @@
 {
   "name": "@lngdao/claude-switch",
-  "version": "0.1.0",
+  "version": "2026.410.1",
   "description": "TUI + CLI to manage Claude Code auth profiles (OAuth tokens, API keys, proxies) and headless setup",
   "type": "module",
   "bin": {
